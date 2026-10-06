@@ -21,12 +21,14 @@
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "lvgl.h"
 #include "src/drivers/sdl/lv_sdl_window.h"
@@ -57,7 +59,7 @@ static void usage(FILE *out, const char *argv0)
 {
     fprintf(out,
             "Usage: %s [--headless] [--scenario FILE] [--run-ms N] "
-            "[--screenshot FILE.ppm]\n"
+            "[--screenshot FILE.ppm] [--stdin]\n"
             "\n"
             "Scenario lines are key=value. Supported keys:\n"
             "  face=boot|idle|listening|thinking|speaking|error|off|happy\n"
@@ -380,6 +382,29 @@ static char *trim(char *text)
     return text;
 }
 
+/* Applies one scenario line in place; blank lines and comments are accepted. */
+static bool apply_line(const char *source, unsigned line_no, char *line, bool real_time)
+{
+    char *entry = trim(line);
+    if (!*entry || *entry == '#') {
+        return true;
+    }
+    char *equals = strchr(entry, '=');
+    if (!equals) {
+        fprintf(stderr, "%s:%u: expected key=value\n", source, line_no);
+        return false;
+    }
+    *equals = '\0';
+    char *key = trim(entry);
+    char *value = trim(equals + 1);
+    if (!apply_setting(key, value, real_time)) {
+        fprintf(stderr, "%s:%u: unsupported or invalid setting: %s=%s\n",
+                source, line_no, key, value);
+        return false;
+    }
+    return true;
+}
+
 static bool run_scenario(const char *path, bool real_time)
 {
     FILE *in = fopen(path, "r");
@@ -391,25 +416,7 @@ static bool run_scenario(const char *path, bool real_time)
     unsigned line_no = 0;
     bool ok = true;
     while (ok && fgets(line, sizeof(line), in)) {
-        line_no++;
-        char *entry = trim(line);
-        if (!*entry || *entry == '#') {
-            continue;
-        }
-        char *equals = strchr(entry, '=');
-        if (!equals) {
-            fprintf(stderr, "%s:%u: expected key=value\n", path, line_no);
-            ok = false;
-            break;
-        }
-        *equals = '\0';
-        char *key = trim(entry);
-        char *value = trim(equals + 1);
-        if (!apply_setting(key, value, real_time)) {
-            fprintf(stderr, "%s:%u: unsupported or invalid setting: %s=%s\n",
-                    path, line_no, key, value);
-            ok = false;
-        }
+        ok = apply_line(path, ++line_no, line, real_time);
     }
     if (ferror(in)) {
         fprintf(stderr, "%s: read failed\n", path);
@@ -417,6 +424,52 @@ static bool run_scenario(const char *path, bool real_time)
     }
     fclose(in);
     return ok;
+}
+
+/*
+ * Applies whatever complete lines standard input has ready, without blocking
+ * the render loop. A bad line is reported and skipped so a driver can carry
+ * on. Returns false once standard input has closed.
+ */
+static bool poll_stdin(void)
+{
+    static char buf[1024];
+    static size_t len;
+    static unsigned line_no;
+    static bool discarding;   /* the rest of a line too long for buf */
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+    while (poll(&pfd, 1, 0) > 0) {
+        if (!(pfd.revents & (POLLIN | POLLHUP))) {
+            return false;
+        }
+        ssize_t n = read(STDIN_FILENO, buf + len, sizeof(buf) - 1 - len);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            return false;
+        }
+        len += (size_t)n;
+        char *start = buf;
+        char *newline;
+        while ((newline = memchr(start, '\n', len - (size_t)(start - buf)))) {
+            *newline = '\0';
+            line_no++;
+            if (!discarding) {
+                (void)apply_line("stdin", line_no, start, true);
+            }
+            discarding = false;
+            start = newline + 1;
+        }
+        len -= (size_t)(start - buf);
+        memmove(buf, start, len);
+        if (len == sizeof(buf) - 1) {
+            fprintf(stderr, "stdin:%u: line too long\n", line_no + 1);
+            discarding = true;
+            len = 0;
+        }
+    }
+    return true;
 }
 
 static int event_watch(void *userdata, SDL_Event *event)
@@ -473,9 +526,12 @@ int main(int argc, char **argv)
     const char *screenshot = NULL;
     uint32_t run_ms = 1000;
     bool headless = false;
+    bool from_stdin = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--headless")) {
             headless = true;
+        } else if (!strcmp(argv[i], "--stdin")) {
+            from_stdin = true;
         } else if (!strcmp(argv[i], "--scenario") && i + 1 < argc) {
             scenario = argv[++i];
         } else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
@@ -524,6 +580,10 @@ int main(int argc, char **argv)
     if (scenario && !run_scenario(scenario, !headless)) {
         return 2;
     }
+    if (from_stdin && (headless || screenshot)) {
+        fprintf(stderr, "--stdin needs an interactive window\n");
+        return 2;
+    }
     if (headless || screenshot) {
         render_for(run_ms, false);
         if (screenshot && !write_snapshot(screenshot)) {
@@ -531,6 +591,9 @@ int main(int argc, char **argv)
         }
     } else {
         while (!s_quit) {
+            if (from_stdin && !poll_stdin()) {
+                break;
+            }
             render_for(FRAME_STEP_MS, true);
         }
     }

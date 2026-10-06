@@ -101,6 +101,30 @@ def main() -> None:
             assert proc.returncode == 2
             assert "unsupported or invalid setting" in proc.stderr
 
+        # --stdin applies lines as they arrive, skips bad ones, and quits when
+        # standard input closes.
+        proc = subprocess.run(
+            [str(binary), "--stdin"],
+            input="face=thinking\ncaption=from stdin\nnot a setting\nlevel=2\nface=idle\n",
+            env={**os.environ, "SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "stdin:3: expected key=value" in proc.stderr
+        assert "stdin:4: unsupported or invalid setting: level=2" in proc.stderr
+
+        proc = subprocess.run(
+            [str(binary), "--stdin", "--headless"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        assert proc.returncode == 2 and "--stdin needs an interactive window" in proc.stderr
+
     for name, digest in sorted(hashes.items()):
         print(f"{name}: {digest}")
 

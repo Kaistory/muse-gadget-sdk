@@ -144,6 +144,39 @@ An included scenario can also initialize a visible interactive session:
 An interactive window requires a display session. Use `--headless` when
 running over SSH or in CI.
 
+## Conversation demo
+
+`chat_demo.py` plays whole voice turns in the window. Type a message in the
+terminal and the simulator listens, thinks with the transcript as its caption,
+speaks the reply a page at a time, and returns to idle, following the order
+`muse_voice.c` uses on a device:
+
+```sh
+python3 esp32/simulator/chat_demo.py
+```
+
+Replies come from a few built-in rules (greetings, the time and date, this
+computer's load, memory and temperature, a joke), in Vietnamese or English.
+Nothing is sent to Muse, and the demo needs no SDK token. The caption font is
+ASCII, so accented text shows without its accents on screen.
+
+For real answers, point it at a chat model behind any OpenAI-compatible
+`/chat/completions` endpoint. It keeps the conversation's history, and the
+window stays in thinking mode while the model replies:
+
+```sh
+python3 esp32/simulator/chat_demo.py --api-url http://127.0.0.1:8045/v1 \
+  --model claude-sonnet-4-6
+```
+
+`MUSE_DEMO_API_URL`, `MUSE_DEMO_MODEL` and `MUSE_DEMO_API_KEY` set the same
+from the environment. If a request fails, the window shows the error screen
+and the terminal prints why.
+
+The demo drives the simulator through `--stdin`, which keeps the window open
+and applies scenario lines from standard input as they arrive. Any program can
+use it the same way; the simulator quits when standard input closes.
+
 ## Scripted and headless runs
 
 A scenario is a text file containing one `key=value` setting per line. Blank
